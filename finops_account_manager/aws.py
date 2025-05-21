@@ -23,52 +23,51 @@ class AWSAccount:
     status: Optional[str] = None        # ACTIVE | SUSPENDED
     parent_id: Optional[str] = None
     parent_type: Optional[str] = None  # 'ORGANIZATIONAL_UNIT' or 'ROOT'
+    parent_name: Optional[str] = None  # e.g. 'Security'
 
 
-def _build_parent_map(client) -> Dict[str, Tuple[str, str]]:
+def _build_parent_map(client) -> Dict[str, Tuple[str, str, str]]:
     """
-    Build a map: account_id -> (parent_id, parent_type) by traversing root and OUs.
+    Build a map: account_id -> (parent_id, parent_type, parent_name) by traversing root and OUs.
     """
-    parent_map: Dict[str, Tuple[str, str]] = {}
+    parent_map: Dict[str, Tuple[str, str, str]] = {}
 
-    # 1) Handle root
+    # List roots
     roots = client.list_roots().get('Roots', [])
-    if not roots:
-        logger.warning('No roots found in Organization')
-        return parent_map
     for root in roots:
         root_id = root['Id']
+        root_name = root.get('Name', 'Root')
         # Accounts directly under root
         try:
             paginator = client.get_paginator('list_children')
             for page in paginator.paginate(ParentId=root_id, ChildType='ACCOUNT'):
                 for child in page.get('Children', []):
                     acct_id = child['Id']
-                    parent_map[acct_id] = (root_id, 'ROOT')
-        except Exception as e:
+                    parent_map[acct_id] = (root_id, 'ROOT', root_name)
+        except (BotoCoreError, ClientError) as e:
             logger.warning(f'Error listing accounts under root {root_id}: {e}')
 
-        # Recursively traverse OUs under root
+        # Traverse organizational units
         queue = [root_id]
         while queue:
             parent = queue.pop(0)
-            # List OUs under this parent
             try:
-                ous_resp = client.list_organizational_units_for_parent(ParentId=parent)
-                ous = ous_resp.get('OrganizationalUnits', [])
-            except Exception as e:
+                ous = client.list_organizational_units_for_parent(ParentId=parent).get('OrganizationalUnits', [])
+            except (BotoCoreError, ClientError) as e:
                 logger.warning(f'Error listing OUs for parent {parent}: {e}')
                 ous = []
+
             for ou in ous:
                 ou_id = ou['Id']
-                # Get accounts under this OU
+                ou_name = ou.get('Name')
+                # Map accounts under this OU
                 try:
                     pag = client.get_paginator('list_children')
                     for pg in pag.paginate(ParentId=ou_id, ChildType='ACCOUNT'):
                         for child in pg.get('Children', []):
                             acct_id = child['Id']
-                            parent_map[acct_id] = (ou_id, 'ORGANIZATIONAL_UNIT')
-                except Exception as e:
+                            parent_map[acct_id] = (ou_id, 'ORGANIZATIONAL_UNIT', ou_name)
+                except (BotoCoreError, ClientError) as e:
                     logger.warning(f'Error listing accounts under OU {ou_id}: {e}')
                 # Enqueue nested OUs
                 queue.append(ou_id)
@@ -77,11 +76,11 @@ def _build_parent_map(client) -> Dict[str, Tuple[str, str]]:
 
 def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
     """
-    List all AWS accounts in the current Organization with status and parent info via efficient traversal.
+    List all AWS accounts in the current Organization with status, parent_id, parent_type, and parent_name.
 
     :param profile: AWS CLI profile to use
-    :param verbose: log progress if True
-    :return: List of AWSAccount
+    :param verbose: if True, logs page-by-page progress
+    :return: List of AWSAccount instances
     """
     session_args = {}
     if profile:
@@ -96,7 +95,7 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
         logger.error(f'Failed to initialize AWS client: {e}')
         sys.exit(1)
 
-    # Build parent mapping once
+    # Build parent mapping
     start = time.time()
     parent_map = _build_parent_map(client)
     if verbose:
@@ -113,17 +112,20 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
             for acct in page.get('Accounts', []):
                 acct_id = acct.get('Id')
                 acct_name = acct.get('Name', '')
-                acct_status = acct.get('Status')  # ACTIVE or SUSPENDED
-                parent_info = parent_map.get(acct_id, (None, None))
-                accounts.append(AWSAccount(
-                    account_id=acct_id,
-                    name=acct_name,
-                    status=acct_status,
-                    parent_id=parent_info[0],
-                    parent_type=parent_info[1]
-                ))
+                acct_status = acct.get('Status')
+                pid, ptype, pname = parent_map.get(acct_id, (None, None, None))
+                accounts.append(
+                    AWSAccount(
+                        account_id=acct_id,
+                        name=acct_name,
+                        status=acct_status,
+                        parent_id=pid,
+                        parent_type=ptype,
+                        parent_name=pname
+                    )
+                )
             if verbose:
-                logger.info(f'Page {page_count}: {len(accounts)} accounts collected so far')
+                logger.info(f'Page {page_count}: collected {len(accounts)} accounts')
     except Exception as e:
         logger.error(f'Error listing AWS accounts: {e}')
         sys.exit(1)
@@ -131,8 +133,3 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
     total = time.time() - start_all
     logger.info(f'Retrieved {len(accounts)} AWS accounts in {total:.2f}s across {page_count} pages')
     return accounts
-
-# Note:
-# - The paginator 'list_accounts' returns for each account keys: Id, Arn, Email, Name, Status, JoinedMethod, JoinedTimestamp
-# - You can access these via acct.get('<Key>').
-# - Parent mapping uses list_roots, list_children (ACCOUNT), and list_organizational_units_for_parent to minimize per-account calls.
