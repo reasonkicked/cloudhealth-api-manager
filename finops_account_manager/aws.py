@@ -17,9 +17,10 @@ logger.setLevel(logging.INFO)
 
 @dataclass
 class AWSAccount:
-    """Represents an AWS account in an Organization, including its parent unit."""
+    """Represents an AWS account in an Organization, including its parent unit and status."""
     account_id: str
     name: str = ""
+    status: Optional[str] = None        # ACTIVE | SUSPENDED
     parent_id: Optional[str] = None
     parent_type: Optional[str] = None  # 'ORGANIZATIONAL_UNIT' or 'ROOT'
 
@@ -76,7 +77,7 @@ def _build_parent_map(client) -> Dict[str, Tuple[str, str]]:
 
 def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
     """
-    List all AWS accounts in the current Organization with parent info via efficient traversal.
+    List all AWS accounts in the current Organization with status and parent info via efficient traversal.
 
     :param profile: AWS CLI profile to use
     :param verbose: log progress if True
@@ -112,10 +113,12 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
             for acct in page.get('Accounts', []):
                 acct_id = acct.get('Id')
                 acct_name = acct.get('Name', '')
+                acct_status = acct.get('Status')  # ACTIVE or SUSPENDED
                 parent_info = parent_map.get(acct_id, (None, None))
                 accounts.append(AWSAccount(
                     account_id=acct_id,
                     name=acct_name,
+                    status=acct_status,
                     parent_id=parent_info[0],
                     parent_type=parent_info[1]
                 ))
