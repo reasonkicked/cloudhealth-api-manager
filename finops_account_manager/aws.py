@@ -30,12 +30,6 @@ class AWSAccount:
 
 
 def _build_ou_maps(client) -> Tuple[Dict[str,str], Dict[str,str]]:
-    """
-    Build maps of OU names and parents.
-    Returns:
-      - ou_name_map: OU_ID -> OU Name
-      - ou_parent_map: OU_ID -> Parent OU or Root ID
-    """
     ou_name_map: Dict[str,str] = {}
     ou_parent_map: Dict[str,str] = {}
 
@@ -59,9 +53,6 @@ def _build_ou_maps(client) -> Tuple[Dict[str,str], Dict[str,str]]:
 
 
 def _build_account_parents(client, ou_name_map) -> Dict[str, Tuple[str,str]]:
-    """
-    Build a map of account_id -> (parent_id, parent_type).
-    """
     account_parents: Dict[str,Tuple[str,str]] = {}
     roots = client.list_roots().get('Roots', [])
     for root in roots:
@@ -84,25 +75,28 @@ def _build_account_parents(client, ou_name_map) -> Dict[str, Tuple[str,str]]:
     return account_parents
 
 
-def _construct_ou_path(ou_id: Optional[str], ou_name_map: Dict[str,str], ou_parent_map: Dict[str,str]) -> List[str]:
-    """
-    Walk up from OU_ID to root, collecting OU names.
-    """
+def _construct_ou_path(client, ou_id: Optional[str], ou_name_map: Dict[str,str], ou_parent_map: Dict[str,str]) -> List[str]:
     path: List[str] = []
     current = ou_id
     while current:
-        name = ou_name_map.get(current)
-        if not name:
+        if current.startswith("r-"):  # root detected, add and break
+            path.insert(0, "Root")
             break
-        path.insert(0, name)
+        if current not in ou_name_map:
+            try:
+                resp = client.describe_organizational_unit(OrganizationalUnitId=current)
+                ou = resp.get('OrganizationalUnit', {})
+                ou_name_map[current] = ou.get('Name', current)
+                ou_parent_map[current] = ou.get('ParentId', '')
+            except Exception as e:
+                logger.warning(f"Failed to describe OU {current}: {e}")
+                break
+        path.insert(0, ou_name_map.get(current, current))
         current = ou_parent_map.get(current)
     return path
 
 
 def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
-    """
-    List all AWS accounts with full OU path and status, using fallback for missing parents.
-    """
     session_args = {}
     if profile:
         session_args['profile_name'] = profile
@@ -145,7 +139,7 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
             pid, ptype = parent_info if parent_info else (None, None)
             ou_path: List[str] = []
             if ptype == 'ORGANIZATIONAL_UNIT':
-                ou_path = _construct_ou_path(pid, ou_name_map, ou_parent_map)
+                ou_path = _construct_ou_path(client, pid, ou_name_map, ou_parent_map)
             accounts.append(AWSAccount(
                 account_id=acct_id,
                 name=name,
@@ -162,9 +156,6 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
 
 
 def save_accounts_to_csv(accounts: List[AWSAccount], directory: str = '.') -> str:
-    """
-    Save a list of AWSAccount objects to a timestamped CSV file.
-    """
     os.makedirs(directory, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"aws_accounts_{timestamp}.csv"
