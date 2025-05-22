@@ -1,10 +1,13 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Tuple
 
 import boto3
 import logging
 import sys
 import time
+import csv
+import os
+from datetime import datetime
 from botocore.exceptions import BotoCoreError, ClientError
 
 # Configure a simple logger for this module
@@ -22,8 +25,8 @@ class AWSAccount:
     name: str = ""
     status: Optional[str] = None        # ACTIVE | SUSPENDED
     parent_id: Optional[str] = None
-    parent_type: Optional[str] = None  # 'ORGANIZATIONAL_UNIT' or 'ROOT'
-    parent_name: Optional[str] = None  # e.g. 'Security'
+    parent_type: Optional[str] = None   # 'ORGANIZATIONAL_UNIT' or 'ROOT'
+    parent_name: Optional[str] = None   # e.g. 'Security'
 
 
 def _build_parent_map(client) -> Dict[str, Tuple[str, str, str]]:
@@ -133,3 +136,56 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
     total = time.time() - start_all
     logger.info(f'Retrieved {len(accounts)} AWS accounts in {total:.2f}s across {page_count} pages')
     return accounts
+
+
+def save_accounts_to_csv(accounts: List[AWSAccount], directory: str = '.') -> str:
+    """
+    Save a list of AWSAccount objects to a timestamped CSV file.
+
+    :param accounts: list of AWSAccount instances
+    :param directory: directory to write the CSV into
+    :return: path to the created CSV file
+    """
+    # Ensure output directory exists
+    os.makedirs(directory, exist_ok=True)
+
+    # Generate filename with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"aws_accounts_{timestamp}.csv"
+    filepath = os.path.join(directory, filename)
+
+    # Write CSV
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        # Header row
+        writer.writerow([
+            'account_id', 'name', 'status',
+            'parent_id', 'parent_type', 'parent_name'
+        ])
+        # Data rows
+        for acct in accounts:
+            writer.writerow([
+                acct.account_id,
+                acct.name,
+                acct.status or '',
+                acct.parent_id or '',
+                acct.parent_type or '',
+                acct.parent_name or ''
+            ])
+
+    logger.info(f"Saved {len(accounts)} accounts to {filepath}")
+    return filepath
+
+
+if __name__ == '__main__':
+    # Example usage
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Fetch AWS accounts and save to CSV')
+    parser.add_argument('--profile', help='AWS CLI profile name', default=None)
+    parser.add_argument('--output-dir', help='Directory to write CSV', default='.')
+    parser.add_argument('--verbose', action='store_true', help='Show progress logs')
+    args = parser.parse_args()
+
+    aws_accts = get_aws_accounts(profile=args.profile, verbose=args.verbose)
+    save_accounts_to_csv(aws_accts, directory=args.output_dir)
