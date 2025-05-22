@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Tuple
 
 import boto3
@@ -44,8 +44,8 @@ def _build_ou_maps(client) -> Tuple[Dict[str,str], Dict[str,str]]:
     while queue:
         parent = queue.pop(0)
         try:
-            response = client.list_organizational_units_for_parent(ParentId=parent)
-            ous = response.get('OrganizationalUnits', [])
+            resp = client.list_organizational_units_for_parent(ParentId=parent)
+            ous = resp.get('OrganizationalUnits', [])
         except (BotoCoreError, ClientError) as e:
             logger.warning(f"Error listing OUs for parent {parent}: {e}")
             continue
@@ -64,7 +64,6 @@ def _build_account_parents(client, ou_name_map) -> Dict[str, Tuple[str,str]]:
     """
     account_parents: Dict[str,Tuple[str,str]] = {}
     roots = client.list_roots().get('Roots', [])
-    # Accounts under root
     for root in roots:
         root_id = root['Id']
         paginator = client.get_paginator('list_children')
@@ -73,8 +72,7 @@ def _build_account_parents(client, ou_name_map) -> Dict[str, Tuple[str,str]]:
                 for ch in page.get('Children', []):
                     account_parents[ch['Id']] = (root_id, 'ROOT')
         except (BotoCoreError, ClientError) as e:
-            logger.warning(f"Error listing children for root {root_id}: {e}")
-    # Accounts under each OU
+            logger.warning(f"Error listing accounts under root {root_id}: {e}")
     for ou_id in ou_name_map:
         paginator = client.get_paginator('list_children')
         try:
@@ -82,25 +80,28 @@ def _build_account_parents(client, ou_name_map) -> Dict[str, Tuple[str,str]]:
                 for ch in page.get('Children', []):
                     account_parents[ch['Id']] = (ou_id, 'ORGANIZATIONAL_UNIT')
         except (BotoCoreError, ClientError) as e:
-            logger.warning(f"Error listing children for OU {ou_id}: {e}")
+            logger.warning(f"Error listing accounts under OU {ou_id}: {e}")
     return account_parents
 
 
 def _construct_ou_path(ou_id: Optional[str], ou_name_map: Dict[str,str], ou_parent_map: Dict[str,str]) -> List[str]:
     """
-    Walk up from OU_ID to root, collecting OU names from top-down.
+    Walk up from OU_ID to root, collecting OU names.
     """
     path: List[str] = []
     current = ou_id
-    while current and current in ou_name_map:
-        path.insert(0, ou_name_map[current])
+    while current:
+        name = ou_name_map.get(current)
+        if not name:
+            break
+        path.insert(0, name)
         current = ou_parent_map.get(current)
     return path
 
 
 def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
     """
-    List all AWS accounts with full OU path and status.
+    List all AWS accounts with full OU path and status, using fallback for missing parents.
     """
     session_args = {}
     if profile:
@@ -114,25 +115,35 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
         logger.error(f"Failed to initialize AWS client: {e}")
         sys.exit(1)
 
-    # Build OU and account-parent maps
-    start = time.time()
     ou_name_map, ou_parent_map = _build_ou_maps(client)
     account_parents = _build_account_parents(client, ou_name_map)
     if verbose:
-        logger.info(f"Built hierarchy maps in {time.time()-start:.2f}s")
+        logger.info(f"Built hierarchy maps: {len(ou_name_map)} OUs, {len(account_parents)} parent links")
 
     accounts: List[AWSAccount] = []
-    start_all = time.time()
-    page_count = 0
     paginator = client.get_paginator('list_accounts')
+    page_count = 0
     for page in paginator.paginate():
         page_count += 1
         for acct in page.get('Accounts', []):
             acct_id = acct.get('Id')
             name = acct.get('Name', '')
             status = acct.get('Status')
-            pid, ptype = account_parents.get(acct_id, (None, None))
-            ou_path = []
+            parent_info = account_parents.get(acct_id)
+            if not parent_info:
+                try:
+                    resp = client.list_parents(ChildId=acct_id)
+                    parents = resp.get('Parents', [])
+                    if parents:
+                        p0 = parents[0]
+                        parent_info = (p0.get('Id'), p0.get('Type'))
+                        account_parents[acct_id] = parent_info
+                        if verbose:
+                            logger.info(f"Fallback parent for {acct_id}: {parent_info}")
+                except (BotoCoreError, ClientError):
+                    parent_info = (None, None)
+            pid, ptype = parent_info if parent_info else (None, None)
+            ou_path: List[str] = []
             if ptype == 'ORGANIZATIONAL_UNIT':
                 ou_path = _construct_ou_path(pid, ou_name_map, ou_parent_map)
             accounts.append(AWSAccount(
@@ -144,27 +155,36 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
                 ou_path=ou_path
             ))
         if verbose:
-            logger.info(f"Page {page_count}: collected {len(accounts)} accounts")
-    total = time.time() - start_all
-    logger.info(f"Retrieved {len(accounts)} AWS accounts in {total:.2f}s across {page_count} pages")
+            logger.info(f"Page {page_count}: {len(accounts)} accounts so far")
+    if verbose:
+        logger.info(f"Finished collecting {len(accounts)} accounts")
     return accounts
 
 
 def save_accounts_to_csv(accounts: List[AWSAccount], directory: str = '.') -> str:
     """
-    Save accounts list to a timestamped CSV.
+    Save a list of AWSAccount objects to a timestamped CSV file.
     """
     os.makedirs(directory, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"aws_accounts_{timestamp}.csv"
-    path = os.path.join(directory, filename)
-    with open(path, 'w', newline='') as f:
-        writer = csv.writer(f)
+    filepath = os.path.join(directory, filename)
+
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
         writer.writerow(['account_id','name','status','parent_id','parent_type','ou_path'])
         for a in accounts:
-            writer.writerow([a.account_id,a.name,a.status or '',a.parent_id or '',a.parent_type or '',"/".join(a.ou_path or [])])
-    logger.info(f"Saved {len(accounts)} accounts to {path}")
-    return path
+            path = a.ou_path or (['Root'] if a.parent_type=='ROOT' else [])
+            writer.writerow([
+                a.account_id,
+                a.name,
+                a.status or '',
+                a.parent_id or '',
+                a.parent_type or '',
+                "/".join(path)
+            ])
+    logger.info(f"Saved {len(accounts)} accounts to {filepath}")
+    return filepath
 
 
 if __name__ == '__main__':
