@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import Optional, List, Dict
 
 import boto3
 import logging
@@ -16,183 +16,164 @@ handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-
 @dataclass
 class AWSAccount:
     account_id: str
-    name: str = ""
-    status: Optional[str] = None
-    parent_id: Optional[str] = None
-    parent_type: Optional[str] = None
-    parent_name: Optional[str] = None
-    grandparent_id: Optional[str] = None
-    grandparent_name: Optional[str] = None
-    ou_path: List[str] = None
+    name: str
+    status: str
+    parent_id: str
+    parent_name: Optional[str] = ''
+    parent_type: Optional[str] = ''
+    grandparent_id: Optional[str] = ''
+    grandparent_name: Optional[str] = ''
+    ou_path: Optional[str] = ''
 
-
-def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
-    """
-    Retrieves all AWS accounts with full OU hierarchy and correct parent names.
-    """
+def get_aws_accounts(profile: Optional[str] = None, limit: Optional[int] = None, verbose: bool = False) -> List[AWSAccount]:
     session_args = {'profile_name': profile} if profile else {}
-    try:
-        if verbose:
-            logger.info(f"Initializing AWS session (profile={profile})")
-        session = boto3.Session(**session_args)
-        client = session.client('organizations')
-    except Exception as e:
-        logger.error(f"Failed to initialize AWS client: {e}")
-        sys.exit(1)
+    session = boto3.Session(**session_args)
+    client = session.client('organizations')
 
-    # Discover root and OUs
-    roots = client.list_roots().get('Roots', [])
-    if not roots:
-        logger.error("No organization root found")
-        sys.exit(1)
-    root_id = roots[0]['Id']
+    accounts = []
+    seen = 0
+    paginator = client.get_paginator('list_accounts')
 
-    ou_name_map: Dict[str, str] = {root_id: 'Root'}
-    ou_parent_map: Dict[str, str] = {root_id: None}
-    ou_path_map: Dict[str, List[str]] = {root_id: ['Root']}
-
-    # BFS to build OU maps
-    queue = [root_id]
-    while queue:
-        parent = queue.pop(0)
-        try:
-            resp = client.list_organizational_units_for_parent(ParentId=parent)
-            ous = resp.get('OrganizationalUnits', [])
-        except (BotoCoreError, ClientError) as e:
-            logger.warning(f"Error listing OUs under {parent}: {e}")
-            continue
-        for ou in ous:
-            ou_id = ou['Id']
-            ou_name = ou['Name']
-            ou_name_map[ou_id] = ou_name
-            ou_parent_map[ou_id] = parent
-            ou_path_map[ou_id] = ou_path_map[parent] + [ou_name]
-            queue.append(ou_id)
-    if verbose:
-        logger.info(f"Discovered {len(ou_name_map)} OUs (incl. root)")
-
-    # Map accounts to parents via list_children
-    account_parents: Dict[str, Tuple[str,str]] = {}
-    paginator = client.get_paginator('list_children')
-    # under root
-    for page in paginator.paginate(ParentId=root_id, ChildType='ACCOUNT'):
-        for ch in page.get('Children', []):
-            account_parents[ch['Id']] = (root_id, 'ROOT')
-    # under each OU
-    for ou_id in list(ou_name_map.keys()):
-        if ou_id == root_id:
-            continue
-        for page in paginator.paginate(ParentId=ou_id, ChildType='ACCOUNT'):
-            for ch in page.get('Children', []):
-                account_parents[ch['Id']] = (ou_id, 'ORGANIZATIONAL_UNIT')
-    if verbose:
-        logger.info(f"Mapped {len(account_parents)} accounts to parents via list_children")
-
-    # Fetch account metadata and enrich
-    accounts: List[AWSAccount] = []
-    acct_paginator = client.get_paginator('list_accounts')
-    for page in acct_paginator.paginate():
+    for page in paginator.paginate():
         for acct in page.get('Accounts', []):
             acct_id = acct['Id']
-            name = acct.get('Name', '')
-            status = acct.get('Status')
-            # parent lookup
-            pid, ptype = account_parents.get(acct_id, (None, None))
-            if not pid:
-                # fallback list_parents
-                try:
-                    resp = client.list_parents(ChildId=acct_id)
-                    parents = resp.get('Parents', [])
-                    if parents:
-                        pid = parents[0]['Id']
-                        ptype = parents[0]['Type']
-                        account_parents[acct_id] = (pid, ptype)
-                        if verbose:
-                            logger.info(f"Fallback list_parents for {acct_id}: {pid}, {ptype}")
-                except (BotoCoreError, ClientError) as e:
-                    logger.warning(f"Fallback list_parents failed for {acct_id}: {e}")
-            # parent name and path
-            if ptype == 'ORGANIZATIONAL_UNIT' and pid:
-                parent_name = ou_name_map.get(pid)
-                if not parent_name:
-                    try:
-                        resp = client.describe_organizational_unit(OrganizationalUnitId=pid)
-                        ou = resp.get('OrganizationalUnit', {})
-                        parent_name = ou.get('Name')
-                        ou_name_map[pid] = parent_name
-                        ou_parent_map[pid] = ou.get('ParentId')
-                        ou_path_map[pid] = ou_path_map.get(ou_parent_map[pid], ['Root']) + [parent_name]
-                        if verbose:
-                            logger.info(f"Described OU {pid}: {parent_name}")
-                    except Exception as e:
-                        logger.warning(f"Describe OU failed for {pid}: {e}")
-                ou_path = ou_path_map.get(pid, ['Root'])
-            else:
-                parent_name = 'Root'
-                ptype = 'ROOT'
-                ou_path = ['Root']
-            # grandparent
-            if ptype == 'ORGANIZATIONAL_UNIT':
-                gpid = ou_parent_map.get(pid)
-                grandparent_name = ou_name_map.get(gpid) if gpid else None
-            else:
-                gpid = None
-                grandparent_name = None
+            acct_name = acct.get('Name', '')
+            acct_status = acct.get('Status', '')
+            try:
+                resp = client.list_parents(ChildId=acct_id)
+                parent = resp['Parents'][0]
+                parent_id = parent['Id']
+                parent_type = parent['Type']
+                if parent_type == 'ORGANIZATIONAL_UNIT':
+                    desc = client.describe_organizational_unit(OrganizationalUnitId=parent_id)
+                    parent_name = desc.get('OrganizationalUnit', {}).get('Name', '')
+                else:
+                    parent_name = 'Root'
+            except Exception as e:
+                logger.warning(f"Failed to get parent for {acct_id}: {e}")
+                parent_id = ''
+                parent_name = ''
+                parent_type = ''
+
             accounts.append(AWSAccount(
                 account_id=acct_id,
-                name=name,
-                status=status,
-                parent_id=pid,
-                parent_type=ptype,
+                name=acct_name,
+                status=acct_status,
+                parent_id=parent_id,
                 parent_name=parent_name,
-                grandparent_id=gpid,
-                grandparent_name=grandparent_name,
-                ou_path=ou_path
+                parent_type=parent_type
             ))
-    if verbose:
-        logger.info(f"Collected {len(accounts)} AWS accounts total")
+
+            seen += 1
+            if limit and seen >= limit:
+                return accounts
+
     return accounts
 
-
-def save_accounts_to_csv(accounts: List[AWSAccount], directory: str = '.') -> str:
-    os.makedirs(directory, exist_ok=True)
+def save_accounts_to_csv(accounts: List[AWSAccount], output_dir: str = '.', filename: Optional[str] = None) -> str:
+    os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"aws_accounts_{timestamp}.csv"
-    filepath = os.path.join(directory, filename)
+    filename = filename or f'aws_accounts_{timestamp}.csv'
+    filepath = os.path.join(output_dir, filename)
 
-    with open(filepath, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow([
-            'account_id','name','status',
-            'parent_id','parent_name','parent_type',
-            'grandparent_id','grandparent_name','ou_path'
-        ])
+    with open(filepath, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['account_id', 'name', 'status', 'parent_id', 'parent_name', 'parent_type', 'grandparent_id', 'grandparent_name', 'ou_path'])
         for a in accounts:
             writer.writerow([
-                a.account_id,
-                a.name,
-                a.status or '',
-                a.parent_id or '',
-                a.parent_name or '',
-                a.parent_type or '',
-                a.grandparent_id or '',
-                a.grandparent_name or '',
-                "/".join(a.ou_path or [])
+                a.account_id, a.name, a.status, a.parent_id,
+                a.parent_name or '', a.parent_type or '',
+                a.grandparent_id or '', a.grandparent_name or '', a.ou_path or ''
             ])
     logger.info(f"Saved {len(accounts)} accounts to {filepath}")
     return filepath
 
+def enrich_grandparents_from_csv(csv_path: str, profile: str, output_path: Optional[str] = None) -> None:
+    session = boto3.Session(profile_name=profile)
+    client = session.client('organizations')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = output_path or csv_path.replace('.csv', f'_enriched_{timestamp}.csv')
+
+    with open(csv_path, 'r', newline='') as infile, open(out_path, 'w', newline='') as outfile:
+        reader = csv.DictReader(infile)
+        fieldnames = reader.fieldnames or []
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in reader:
+            account_id = row.get('account_id', '<unknown>')
+            parent_id = row.get('parent_id', '')
+            if parent_id.startswith('ou-') and not row.get('parent_name'):
+                try:
+                    ou_resp = client.describe_organizational_unit(OrganizationalUnitId=parent_id)
+                    ou = ou_resp.get('OrganizationalUnit', {})
+                    row['parent_name'] = ou.get('Name', '')
+                    logger.info(f"Enriched parent_name for {account_id}: {row['parent_name']}")
+                except Exception as e:
+                    logger.warning(f"Failed to describe parent OU for {account_id}: {e}")
+
+            if parent_id.startswith('ou-') and not (row.get('grandparent_id') and row.get('grandparent_name')):
+                try:
+                    resp = client.list_parents(ChildId=parent_id)
+                    parents = resp.get('Parents', [])
+                    if parents:
+                        gp = parents[0]
+                        gp_id = gp.get('Id')
+                        row['grandparent_id'] = gp_id
+                        if gp['Type'] == 'ORGANIZATIONAL_UNIT':
+                            desc = client.describe_organizational_unit(OrganizationalUnitId=gp_id)
+                            gp_name = desc.get('OrganizationalUnit', {}).get('Name', '')
+                        else:
+                            gp_name = 'Root'
+                        row['grandparent_name'] = gp_name
+                        logger.info(f"Enriched grandparent for {account_id}: {gp_id}, {gp_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to enrich grandparent for {account_id}: {e}")
+
+            writer.writerow(row)
+
+    logger.info(f"Enriched CSV written to {out_path}")
+    analyze_missing_fields(out_path)
+
+def analyze_missing_fields(csv_path: str) -> None:
+    with open(csv_path, 'r', newline='') as infile:
+        reader = csv.DictReader(infile)
+        total = 0
+        missing_parents = 0
+        missing_grandparents = 0
+
+        for row in reader:
+            total += 1
+            if not row.get('parent_name'):
+                missing_parents += 1
+            if not row.get('grandparent_name'):
+                missing_grandparents += 1
+
+        logger.info(f"Analyzed {total} accounts")
+        logger.info(f"Missing parent_name: {missing_parents}")
+        logger.info(f"Missing grandparent_name: {missing_grandparents}")
+
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Export AWS accounts with OU hierarchy to CSV')
-    parser.add_argument('--profile', help='AWS CLI profile', default=None)
-    parser.add_argument('--output-dir', help='Directory for CSV', default='.')
+    parser = argparse.ArgumentParser(description='Fetch, enrich, and analyze AWS account OU hierarchy')
+    parser.add_argument('--profile', required=True, help='AWS CLI profile name')
+    parser.add_argument('--output-dir', default='.', help='Directory for output CSV')
+    parser.add_argument('--limit', type=int, help='Limit number of AWS accounts to fetch')
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--analyze-only', help='Analyze missing fields in existing CSV')
+    parser.add_argument('--enrich', help='Enrich parent/grandparent info in existing CSV')
+
     args = parser.parse_args()
-    accts = get_aws_accounts(profile=args.profile, verbose=args.verbose)
-    save_accounts_to_csv(accts, directory=args.output_dir)
+
+    if args.analyze_only:
+        analyze_missing_fields(args.analyze_only)
+    elif args.enrich:
+        enrich_grandparents_from_csv(args.enrich, args.profile)
+    else:
+        accounts = get_aws_accounts(profile=args.profile, limit=args.limit, verbose=args.verbose)
+        csv_path = save_accounts_to_csv(accounts, output_dir=args.output_dir)
+        enrich_grandparents_from_csv(csv_path, args.profile)
