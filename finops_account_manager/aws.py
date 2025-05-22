@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 
 import boto3
 import logging
@@ -32,7 +32,7 @@ class AWSAccount:
 
 def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> List[AWSAccount]:
     """
-    Retrieves all AWS accounts with full OU hierarchy, ensuring parent names are filled.
+    Retrieves all AWS accounts with full OU hierarchy and correct parent names.
     """
     session_args = {'profile_name': profile} if profile else {}
     try:
@@ -44,7 +44,7 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
         logger.error(f"Failed to initialize AWS client: {e}")
         sys.exit(1)
 
-    # 1) Discover roots and build OU maps
+    # Discover root and OUs
     roots = client.list_roots().get('Roots', [])
     if not roots:
         logger.error("No organization root found")
@@ -55,6 +55,7 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
     ou_parent_map: Dict[str, str] = {root_id: None}
     ou_path_map: Dict[str, List[str]] = {root_id: ['Root']}
 
+    # BFS to build OU maps
     queue = [root_id]
     while queue:
         parent = queue.pop(0)
@@ -74,8 +75,8 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
     if verbose:
         logger.info(f"Discovered {len(ou_name_map)} OUs (incl. root)")
 
-    # 2) Map accounts to their direct parent via list_children
-    account_parents: Dict[str, Tuple[str, str]] = {}
+    # Map accounts to parents via list_children
+    account_parents: Dict[str, Tuple[str,str]] = {}
     paginator = client.get_paginator('list_children')
     # under root
     for page in paginator.paginate(ParentId=root_id, ChildType='ACCOUNT'):
@@ -91,19 +92,18 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
     if verbose:
         logger.info(f"Mapped {len(account_parents)} accounts to parents via list_children")
 
-    # 3) Fetch account metadata and ensure parent_name via fallback if necessary
+    # Fetch account metadata and enrich
     accounts: List[AWSAccount] = []
-    acct_page = client.get_paginator('list_accounts')
-    for page in acct_page.paginate():
+    acct_paginator = client.get_paginator('list_accounts')
+    for page in acct_paginator.paginate():
         for acct in page.get('Accounts', []):
             acct_id = acct['Id']
             name = acct.get('Name', '')
             status = acct.get('Status')
-            # determine parent
-            if acct_id in account_parents:
-                pid, ptype = account_parents[acct_id]
-            else:
-                # fallback: ask per-account
+            # parent lookup
+            pid, ptype = account_parents.get(acct_id, (None, None))
+            if not pid:
+                # fallback list_parents
                 try:
                     resp = client.list_parents(ChildId=acct_id)
                     parents = resp.get('Parents', [])
@@ -111,16 +111,14 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
                         pid = parents[0]['Id']
                         ptype = parents[0]['Type']
                         account_parents[acct_id] = (pid, ptype)
-                    else:
-                        pid = ptype = None
-                except Exception as e:
+                        if verbose:
+                            logger.info(f"Fallback list_parents for {acct_id}: {pid}, {ptype}")
+                except (BotoCoreError, ClientError) as e:
                     logger.warning(f"Fallback list_parents failed for {acct_id}: {e}")
-                    pid = ptype = None
-            # determine parent_name
+            # parent name and path
             if ptype == 'ORGANIZATIONAL_UNIT' and pid:
-                if pid in ou_name_map:
-                    parent_name = ou_name_map[pid]
-                else:
+                parent_name = ou_name_map.get(pid)
+                if not parent_name:
                     try:
                         resp = client.describe_organizational_unit(OrganizationalUnitId=pid)
                         ou = resp.get('OrganizationalUnit', {})
@@ -128,21 +126,22 @@ def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False) -> Li
                         ou_name_map[pid] = parent_name
                         ou_parent_map[pid] = ou.get('ParentId')
                         ou_path_map[pid] = ou_path_map.get(ou_parent_map[pid], ['Root']) + [parent_name]
+                        if verbose:
+                            logger.info(f"Described OU {pid}: {parent_name}")
                     except Exception as e:
-                        logger.warning(f"Failed to describe OU {pid}: {e}")
-                        parent_name = None
+                        logger.warning(f"Describe OU failed for {pid}: {e}")
                 ou_path = ou_path_map.get(pid, ['Root'])
             else:
                 parent_name = 'Root'
                 ptype = 'ROOT'
                 ou_path = ['Root']
-            # grandparent info
+            # grandparent
             if ptype == 'ORGANIZATIONAL_UNIT':
                 gpid = ou_parent_map.get(pid)
-                gptype = 'ROOT' if gpid == root_id else 'ORGANIZATIONAL_UNIT'
                 grandparent_name = ou_name_map.get(gpid) if gpid else None
             else:
-                gpid = gptype = grandparent_name = None
+                gpid = None
+                grandparent_name = None
             accounts.append(AWSAccount(
                 account_id=acct_id,
                 name=name,
