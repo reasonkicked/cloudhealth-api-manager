@@ -1,7 +1,10 @@
 import logging
 import sys
 import requests
-from dataclasses import dataclass
+import os
+import csv
+from datetime import datetime
+from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Union
 
 # Configure logger
@@ -46,13 +49,11 @@ def get_cloudhealth_accounts(api_key: str, client_api_id: int) -> List[CHAccount
     # Parse JSON, handle possible dict-wrapper
     raw: Union[List, Dict] = resp.json()
     if isinstance(raw, dict):
-        # unwrap common envelope keys
         if 'aws_accounts' in raw and isinstance(raw['aws_accounts'], list):
             items = raw['aws_accounts']
         elif 'data' in raw and isinstance(raw['data'], list):
             items = raw['data']
         else:
-            # fallback: first list found
             lists = [v for v in raw.values() if isinstance(v, list)]
             items = lists[0] if lists else []
     elif isinstance(raw, list):
@@ -65,11 +66,7 @@ def get_cloudhealth_accounts(api_key: str, client_api_id: int) -> List[CHAccount
     for item in items:
         if not isinstance(item, dict):
             continue
-        tags = {}
-        for t in item.get('tags', []):
-            # skip malformed entries
-            if isinstance(t, dict) and 'key' in t and 'value' in t:
-                tags[t['key']] = t['value']
+        tags = {t['key']: t['value'] for t in item.get('tags', []) if isinstance(t, dict) and 'key' in t and 'value' in t}
         try:
             ch_id = int(item.get('id', 0))
         except (ValueError, TypeError):
@@ -87,42 +84,42 @@ def get_cloudhealth_accounts(api_key: str, client_api_id: int) -> List[CHAccount
     return accounts
 
 
-def update_cloudhealth_account(ch_id: int,
-                               new_name: Optional[str] = None,
-                               new_tags: Optional[Dict[str, str]] = None,
-                               api_key: str = None,
-                               client_api_id: int = None,
-                               dry_run: bool = False) -> None:
+def save_cloudhealth_accounts_to_csv(accounts: List[CHAccount], directory: str = '.') -> str:
     """
-    Update a single AWS account record in CloudHealth.
+    Save a list of CHAccount objects to a timestamped CSV file.
 
-    :param ch_id: CloudHealth record ID
-    :param new_name: desired name (if provided)
-    :param new_tags: desired tags dict (if provided)
-    :param api_key: CloudHealth API key
-    :param client_api_id: CloudHealth client ID
-    :param dry_run: if True, only log without sending
+    :param accounts: list of CHAccount instances
+    :param directory: directory to write the CSV into
+    :return: path to the created CSV file
     """
-    url = f"https://chapi.cloudhealthtech.com/v1/aws_accounts/{ch_id}"
-    params = {
-        'api_key': api_key,
-        'client_api_id': client_api_id
-    }
-    payload: Dict = {}
-    if new_name is not None:
-        payload['name'] = new_name
-    if new_tags is not None:
-        payload['tags'] = [{'key': k, 'value': v} for k, v in new_tags.items()]
+    os.makedirs(directory, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"cloudhealth_accounts_{timestamp}.csv"
+    filepath = os.path.join(directory, filename)
 
-    if dry_run:
-        logger.info(f"DRY RUN: PUT {url} params={params} payload={payload}")
-        return
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        # Header
+        writer.writerow(['ch_id', 'aws_account_id', 'name', 'tags'])
+        for acct in accounts:
+            writer.writerow([
+                acct.ch_id,
+                acct.aws_account_id,
+                acct.name,
+                ';'.join(f"{k}={v}" for k, v in acct.tags.items())
+            ])
+    logger.info(f"Saved {len(accounts)} CloudHealth accounts to {filepath}")
+    return filepath
 
-    headers = {'Content-Type': 'application/json'}
-    try:
-        resp = requests.put(url, params=params, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        logger.info(f"Updated CloudHealth account {ch_id}")
-    except requests.RequestException as e:
-        logger.error(f"Failed to update CloudHealth account {ch_id}: {e}")
-        sys.exit(1)
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Fetch CloudHealth accounts and save to CSV')
+    parser.add_argument('--api-key', required=True, help='CloudHealth API key')
+    parser.add_argument('--client-api-id', type=int, required=True, help='CloudHealth client ID')
+    parser.add_argument('--output-dir', default='.', help='Directory to write CSV')
+    args = parser.parse_args()
+
+    ch_accounts = get_cloudhealth_accounts(args.api_key, args.client_api_id)
+    save_cloudhealth_accounts_to_csv(ch_accounts, directory=args.output_dir)
