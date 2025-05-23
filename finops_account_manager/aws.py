@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 import boto3
 import logging
@@ -28,11 +28,9 @@ class AWSAccount:
     grandparent_name: Optional[str]
 
 
-def get_aws_accounts(profile: Optional[str] = None,
-                     verbose: bool = False,
-                     limit: Optional[int] = None) -> List[AWSAccount]:
+def get_aws_accounts(profile: Optional[str] = None, verbose: bool = False, limit: Optional[int] = None) -> List[AWSAccount]:
     """
-    Fetch accounts and resolve parent and grandparent OU names inline.
+    Fetch accounts and resolve parent and grandparent OU names inline, skipping grandparent for root.
     """
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     client = session.client('organizations')
@@ -52,9 +50,9 @@ def get_aws_accounts(profile: Optional[str] = None,
                 resp = client.list_parents(ChildId=acct_id)
                 parents = resp.get('Parents', [])
                 if parents:
-                    p = parents[0]
-                    parent_id = p['Id']
-                    parent_type = p['Type']
+                    parent = parents[0]
+                    parent_id = parent['Id']
+                    parent_type = parent['Type']
                 else:
                     parent_id = None
                     parent_type = None
@@ -74,26 +72,20 @@ def get_aws_accounts(profile: Optional[str] = None,
             else:
                 parent_name = 'Root' if parent_type == 'ROOT' else None
 
-            # get grandparent
-            if parent_id:
+            # get grandparent (skip if parent is root or missing)
+            gp_id = None
+            gp_name = None
+            gp_type = None
+            if parent_type == 'ORGANIZATIONAL_UNIT' and parent_id:
                 try:
                     resp2 = client.list_parents(ChildId=parent_id)
                     gps = resp2.get('Parents', [])
                     if gps:
                         gp = gps[0]
-                        gp_id = gp['Id']
-                        gp_type = gp['Type']
-                    else:
-                        gp_id = None
-                        gp_type = None
+                        gp_id = gp.get('Id')
+                        gp_type = gp.get('Type')
                 except (BotoCoreError, ClientError) as e:
                     logger.warning(f"list_parents failed for parent {parent_id}: {e}")
-                    gp_id = None
-                    gp_type = None
-            else:
-                gp_id = None
-                gp_type = None
-
             # resolve grandparent name
             if gp_type == 'ORGANIZATIONAL_UNIT' and gp_id:
                 try:
@@ -101,9 +93,8 @@ def get_aws_accounts(profile: Optional[str] = None,
                     gp_name = desc2['OrganizationalUnit'].get('Name')
                 except (ClientError, BotoCoreError) as e:
                     logger.warning(f"describe OU failed for grandparent {gp_id}: {e}")
-                    gp_name = None
-            else:
-                gp_name = 'Root' if gp_type == 'ROOT' else None
+            elif gp_type == 'ROOT':
+                gp_name = 'Root'
 
             accounts.append(AWSAccount(
                 account_id=acct_id,
@@ -119,7 +110,7 @@ def get_aws_accounts(profile: Optional[str] = None,
             count += 1
             if limit and count >= limit:
                 if verbose:
-                    logger.info(f"Limit {limit} reached, stopping.")
+                    logger.info(f"Limit {limit} reached, stopping processing")
                 return accounts
             if verbose and count % 100 == 0:
                 logger.info(f"Processed {count} accounts so far")
@@ -149,10 +140,10 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Export AWS accounts with parent and grandparent OUs')
     parser.add_argument('--profile', help='AWS CLI profile', default=None)
-    parser.add_argument('--limit', type=int, help='Test mode limit')
     parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--output-dir', help='CSV output dir', default='.')
+    parser.add_argument('--limit', type=int, help='Limit number of accounts to process')
+    parser.add_argument('--output-dir', help='CSV output directory', default='.')
     args = parser.parse_args()
 
-    acct_list = get_aws_accounts(profile=args.profile, limit=args.limit, verbose=args.verbose)
+    acct_list = get_aws_accounts(profile=args.profile, verbose=args.verbose, limit=args.limit)
     save_accounts_to_csv(acct_list, output_dir=args.output_dir)
