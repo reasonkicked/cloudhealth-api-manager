@@ -20,8 +20,10 @@ def load_ch_csv(path):
         reader = csv.DictReader(f)
         for row in reader:
             aws_id = row.get('aws_account_id', '').strip()
+            ch_id = row.get('ch_id', '').strip()
+            old_name = row.get('name', '').strip()
             if aws_id:
-                ch_map[aws_id] = row
+                ch_map[aws_id] = {'ch_id': ch_id, 'old_name': old_name}
     return ch_map
 
 def generate_plan(aws_csv, ch_csv, out_path):
@@ -32,13 +34,12 @@ def generate_plan(aws_csv, ch_csv, out_path):
     unmatched_ch = 0
     unmatched_aws = 0
 
-    # Match CH -> AWS
-    for aws_id, ch in ch_map.items():
-        ch_id = ch.get('ch_id')
-        if aws_id in aws_map:
-            aws = aws_map[aws_id]
+    for aws_id, aws in aws_map.items():
+        if aws_id in ch_map:
+            ch = ch_map[aws_id]
             entry = {
-                'ch_id': ch_id,
+                'ch_id': ch['ch_id'],
+                'old_name': ch['old_name'],
                 'new_name': aws['name'],
                 'tags': {
                     'ou-level-1': aws.get('grandparent_name', ''),
@@ -48,14 +49,13 @@ def generate_plan(aws_csv, ch_csv, out_path):
             plan.append(entry)
             matched += 1
         else:
-            print(f"[WARN] CH entry {ch_id} aws_account_id {aws_id} not found in AWS CSV")
-            unmatched_ch += 1
-
-    # Optionally, warn for AWS accounts not found in CH
-    for aws_id in aws_map:
-        if aws_id not in ch_map:
-            print(f"[INFO] AWS account {aws_id} ({aws_map[aws_id]['name']}) not found in CH CSV")
+            print(f"[INFO] AWS account {aws_id} ({aws.get('name')}) not found in CH CSV")
             unmatched_aws += 1
+
+    for aws_id in ch_map:
+        if aws_id not in aws_map:
+            print(f"[WARN] CH account {aws_id} ({ch_map[aws_id]['old_name']}) not found in AWS CSV")
+            unmatched_ch += 1
 
     with open(out_path, 'w') as f:
         json.dump(plan, f, indent=2)
