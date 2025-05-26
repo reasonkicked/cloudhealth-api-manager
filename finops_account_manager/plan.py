@@ -94,6 +94,7 @@ def generate_plan(aws_csv, ch_csv, out_path):
             # Only include if CH old_name is placeholder (same as aws_id)
             if ch['old_name'] == aws_id:
                 entry = {
+                    'aws_id': aws_id,
                     'ch_id': ch['ch_id'],
                     'old_name': ch['old_name'],
                     'new_name': aws.get('name', '').strip(),
