@@ -5,7 +5,7 @@ import os
 import csv
 from datetime import datetime
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Union
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -31,15 +31,18 @@ def get_cloudhealth_accounts(api_key: str,
     """
     Fetch all AWS accounts from CloudHealth for a given client, handling pagination.
 
+    Uses API key and client_api_id as query params (legacy auth).
+
     :param api_key: CloudHealth API key
     :param client_api_id: CloudHealth client ID
     :param per_page: Number of results per page (max 100)
     :return: list of CHAccount
     """
-    url = 'https://chapi.cloudhealthtech.com/v1/aws_accounts'
+    base_url = 'https://chapi.cloudhealthtech.com/v1/aws_accounts'
     page = 1
     all_items: List[Dict] = []
 
+    # Pagination loop
     while True:
         params = {
             'api_key': api_key,
@@ -48,22 +51,16 @@ def get_cloudhealth_accounts(api_key: str,
             'per_page': per_page
         }
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(base_url, params=params, timeout=30)
             resp.raise_for_status()
         except requests.RequestException as e:
             logger.error(f"Error fetching CloudHealth accounts page {page}: {e}")
             sys.exit(1)
 
         data = resp.json()
-        # unwrap to list
+        # unwrap
         if isinstance(data, dict):
-            if 'aws_accounts' in data and isinstance(data['aws_accounts'], list):
-                items = data['aws_accounts']
-            elif 'data' in data and isinstance(data['data'], list):
-                items = data['data']
-            else:
-                lists = [v for v in data.values() if isinstance(v, list)]
-                items = lists[0] if lists else []
+            items = data.get('aws_accounts') or data.get('data') or []
         elif isinstance(data, list):
             items = data
         else:
@@ -76,37 +73,29 @@ def get_cloudhealth_accounts(api_key: str,
             break
         all_items.extend(items)
         if count < per_page:
-            # last page
             break
         page += 1
 
     logger.info(f"Total CloudHealth accounts retrieved: {len(all_items)}")
 
-    # Parse into CHAccount objects
+    # Parse into CHAccount
     accounts: List[CHAccount] = []
     for item in all_items:
         if not isinstance(item, dict):
             continue
-        tags = {t['key']: t['value'] for t in item.get('tags', [])
-                if isinstance(t, dict) and 'key' in t and 'value' in t}
         try:
             ch_id = int(item.get('id', 0))
         except (ValueError, TypeError):
-            logger.warning(f"Invalid id field: {item.get('id')}")
+            logger.warning(f"Invalid id: {item.get('id')}")
             continue
-        aws_acc = str(item.get('aws_account_number', '')).strip()
-        if not aws_acc:
-            name_field = str(item.get('name', '')).strip()
-            if name_field.isdigit():
-                aws_acc = name_field
-        accounts.append(
-            CHAccount(
-                ch_id=ch_id,
-                aws_account_id=aws_acc,
-                name=str(item.get('name', '')).strip(),
-                tags=tags
-            )
-        )
+        # Prefer 'aws_account_number', fallback to 'owner_id'
+        aws_acc = str(item.get('aws_account_number') or item.get('owner_id', '')).strip()
+        name = str(item.get('name') or '').strip()
+        tags = {}
+        for t in item.get('tags', []):
+            if isinstance(t, dict) and 'key' in t and 'value' in t:
+                tags[t['key']] = t['value']
+        accounts.append(CHAccount(ch_id=ch_id, aws_account_id=aws_acc, name=name, tags=tags))
 
     return accounts
 
@@ -130,15 +119,18 @@ def save_cloudhealth_accounts_to_csv(accounts: List[CHAccount], directory: str =
     logger.info(f"Saved {len(accounts)} CloudHealth accounts to {filepath}")
     return filepath
 
+
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Fetch CloudHealth accounts and save to CSV')
     parser.add_argument('--api-key', required=True, help='CloudHealth API key')
-    parser.add_argument('--client-api-id', type=int, required=True, help='CloudHealth client ID')
+    parser.add_argument('--client-api-id', type=int, required=True, help='CloudHealth client API ID')
     parser.add_argument('--per-page', type=int, default=100, help='Results per page (max 100)')
     parser.add_argument('--output-dir', default='.', help='Directory to write CSV')
     args = parser.parse_args()
 
-    ch_accounts = get_cloudhealth_accounts(args.api_key, args.client_api_id, per_page=args.per_page)
+    ch_accounts = get_cloudhealth_accounts(
+        args.api_key, args.client_api_id, per_page=args.per_page
+    )
     save_cloudhealth_accounts_to_csv(ch_accounts, directory=args.output_dir)
