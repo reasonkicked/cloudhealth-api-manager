@@ -99,8 +99,8 @@ def generate_plan(aws_csv, ch_csv, out_path):
                     'old_name': ch['old_name'],
                     'new_name': aws.get('name', '').strip(),
                     'tags': {
-                        'ou-level-1': aws.get('grandparent_name', '').strip(),
-                        'ou-level-2': aws.get('parent_name', '').strip()
+                        'ou-level1': aws.get('grandparent_name', '').strip(),
+                        'ou-level2': aws.get('parent_name', '').strip()
                     }
                 }
                 plan.append(entry)
