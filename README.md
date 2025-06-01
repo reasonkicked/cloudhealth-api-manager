@@ -4,9 +4,7 @@
 A toolkit to synchronize AWS account metadata with CloudHealth via the CloudHealth API.
 
 ## Workflow Diagram
-```mermaid
 ![workflow.png](workflow.png)
-```
 
 ## Components
 | File              | Purpose                                                                 |
@@ -41,15 +39,16 @@ pip install -r requirements.txt
 ### 1. Fetch AWS Data
 ```bash
 python -m finops_account_manager.aws \
-  --profile default \
-  --output-dir ./exports
+  --profile default \   #or relevant
+  --output-dir ./exports \
+  --verbose
 ```
 
 ### 2. Fetch CloudHealth Data
 ```bash
 python -m finops_account_manager.cloudhealth \
-  --api-key $CH_API_KEY \
-  --client-api-id 45374 \
+  --api-key $CH_API_KEY \   #Your CH API Key
+  --client-api-id 45374 \   #Zandbak
   --output-dir ./exports
 ```
 
@@ -66,8 +65,8 @@ python -m finops_account_manager.plan \
 ```bash
 python -m finops_account_manager.apply \
   --plan plan.json \
-  --api-key $CH_API_KEY \
-  --client-api-id 45374 \
+  --api-key $CH_API_KEY \   #Your CH API Key
+  --client-api-id 45374 \   #Zandbak
   --dry-run
 ```
 
@@ -75,16 +74,16 @@ python -m finops_account_manager.apply \
 ```bash
 python -m finops_account_manager.apply \
   --plan plan.json \
-  --api-key $CH_API_KEY \
-  --client-api-id 45374
+  --api-key $CH_API_KEY \   #Your CH API Key
+  --client-api-id 45374     #Zandbak
 ```
 
 ## Plan Schema
 ```json
 {
   "aws_id": "123456789012",
-  "ch_id": "998877",
-  "old_name": "123456789012",
+  "ch_id": "998877666555",
+  "old_name": "998877666555",
   "new_name": "core-prod",
   "tags": {
     "ou-level-1": "Platform",
