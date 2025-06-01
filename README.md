@@ -4,7 +4,7 @@
 A toolkit to synchronize AWS account metadata with CloudHealth via the CloudHealth API.
 
 ## Workflow Diagram
-![workflow.png](workflow.png)
+![Image](https://github.com/user-attachments/assets/59e77c3b-97c4-4d99-8180-3d9e057dfbcd)
 
 ## Components
 | File              | Purpose                                                                 |
